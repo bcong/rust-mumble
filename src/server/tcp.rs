@@ -1,6 +1,5 @@
 use std::net::IpAddr;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use crate::client::{Client, ClientArc};
@@ -13,7 +12,6 @@ use crate::server::constants::MAX_CLIENTS;
 use crate::state::ServerStateRef;
 use anyhow::Context;
 use futures::TryFutureExt;
-use regex::Regex;
 use tokio::io::{self};
 use tokio::io::{AsyncWriteExt, ReadHalf};
 use tokio::net::{TcpListener, TcpStream};
@@ -50,9 +48,6 @@ pub async fn create_tcp_server(
 
         let server_version = server_version.clone();
         let state = state.clone();
-
-        let restrict_to_version = state.restrict_to_version.clone();
-        let super_user = state.super_user.clone();
 
         let cur_clients = state.active_clients.load(Ordering::Relaxed) as usize;
         let addr = match tcp_stream.peer_addr() {
@@ -125,7 +120,7 @@ pub async fn create_tcp_server(
                 (Err(e), _) => return Err(e),
             };
 
-            handle_new_client(tls_stream, peer_ip, server_version, restrict_to_version, super_user, state).await
+            handle_new_client(tls_stream, peer_ip, server_version, state).await
         });
     }
 }
@@ -135,37 +130,10 @@ async fn handle_new_client(
     mut tls_stream: TlsStream<TcpStream>,
     peer_ip: IpAddr,
     server_version: Version,
-    restrict_to_version: Arc<Option<String>>,
-    super_user: Arc<Option<(String, String)>>,
     state: ServerStateRef,
 ) -> Result<(), anyhow::Error> {
     let (version, authenticate, crypt_state) = Client::init(&mut tls_stream, server_version).await.context("init client")?;
-    let version_release = version.get_release();
     let username = authenticate.get_username().to_string();
-
-    static USERNAME_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[\d+\].*$").unwrap());
-
-    if let Some(restrict_to) = restrict_to_version.as_ref() {
-        let is_super_user = super_user
-            .as_ref()
-            .as_ref()
-            .is_some_and(|(name, password)| *name == username && *password == authenticate.get_password());
-
-        if !is_super_user && (!version_release.to_lowercase().contains(restrict_to) || !USERNAME_REGEX.is_match(&username)) {
-            tracing::warn!(
-                "User '{}' connected with unofficial client '{}' from {}",
-                username,
-                version_release,
-                peer_ip
-            );
-
-            return Err(anyhow::anyhow!("Disconnecting unofficial client username: {}", username));
-        }
-
-        if is_super_user {
-            tracing::info!("Super user '{}' connected from {}, bypassing restrict_to_version", username, peer_ip);
-        }
-    }
 
     let (read, write) = io::split(tls_stream);
 
