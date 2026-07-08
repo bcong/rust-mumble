@@ -70,6 +70,8 @@ pub struct ServerState {
     pub disconnect_queue: ConcurrentHashMap<u32, DisconnectReason>,
     pub codec_state: Arc<CodecState>,
     pub socket: Arc<UdpSocket>,
+    pub restrict_to_version: Arc<Option<String>>,
+    pub super_user: Arc<Option<(String, String)>>,
     // used only for logging
     pub debug_message_id: AtomicU64,
     // pub logs: HashCache<SocketAddr, ()>,
@@ -79,7 +81,12 @@ pub struct ServerState {
 }
 
 impl ServerState {
-    pub fn new(socket: Arc<UdpSocket>, remove_positional_data: bool) -> Self {
+    pub fn new(
+        socket: Arc<UdpSocket>,
+        remove_positional_data: bool,
+        restrict_to_version: Option<String>,
+        super_user: Option<(String, String)>,
+    ) -> Self {
         let channels = ConcurrentHashMap::new();
         let _ = channels.insert(0, Channel::new(0, Some(0), "Root".to_string(), "Root channel".to_string(), false));
 
@@ -88,6 +95,8 @@ impl ServerState {
             // we preallocate the maximum amount of clients to prevent the possibility of resizes
             // later, which will prevent double-sends in certain situations
             clients: ConcurrentHashMap::with_capacity(MAX_CLIENTS),
+            restrict_to_version: Arc::new(restrict_to_version.map(|v| v.to_lowercase())),
+            super_user: Arc::new(super_user),
             // logs: HashCache::with_capacity(500, 1000),
             clients_without_udp: ConcurrentHashMap::with_capacity(MAX_CLIENTS),
             clients_by_socket: ConcurrentHashMap::with_capacity(MAX_CLIENTS),
