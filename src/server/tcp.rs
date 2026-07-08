@@ -1,0 +1,232 @@
+use std::net::IpAddr;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
+
+use crate::client::{Client, ClientArc};
+use crate::error::DisconnectReason;
+use crate::handler::MessageHandler;
+use crate::message::ClientMessage;
+use crate::proto::MessageKind;
+use crate::proto::mumble::Version;
+use crate::server::constants::MAX_CLIENTS;
+use crate::state::ServerStateRef;
+use anyhow::Context;
+use futures::TryFutureExt;
+use regex::Regex;
+use tokio::io::{self};
+use tokio::io::{AsyncWriteExt, ReadHalf};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
+use tokio_rustls::{TlsAcceptor, server::TlsStream};
+
+use socket2::{SockRef, TcpKeepalive};
+
+fn shutdown_tcp_stream(mut tcp_stream: TcpStream) {
+    tokio::spawn(async move {
+        // we don't care if this errors, drop the result
+        let _ = tcp_stream.shutdown().await;
+    });
+}
+
+pub async fn create_tcp_server(
+    tcp_listener: TcpListener,
+    acceptor: TlsAcceptor,
+    server_version: Version,
+    state: ServerStateRef,
+) -> anyhow::Result<()> {
+    let tls_acceptor = acceptor.clone();
+
+    loop {
+        let (tcp_stream, _remote_addr) = match tcp_listener.accept().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("Failed to accept TCP stream: {}", e);
+                continue;
+            }
+        };
+        let tls_acceptor = tls_acceptor.clone();
+
+        let server_version = server_version.clone();
+        let state = state.clone();
+
+        let restrict_to_version = state.restrict_to_version.clone();
+
+        let cur_clients = state.active_clients.load(Ordering::Relaxed) as usize;
+        let addr = match tcp_stream.peer_addr() {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::error!("Failed to get TCP stream address: {}", e);
+                shutdown_tcp_stream(tcp_stream);
+                continue;
+            }
+        };
+
+        // if we're over our max client count then we should shut down the tcp stream
+        if cur_clients >= MAX_CLIENTS {
+            shutdown_tcp_stream(tcp_stream);
+            tracing::info!(
+                "{:?} tried to join but the server is at maximum capacity ({}/{})",
+                addr,
+                cur_clients,
+                MAX_CLIENTS
+            );
+            continue;
+        }
+
+        let handle_accept_tls_stream = async move {
+            let peer_ip = addr.ip();
+
+            // disable nagle algo
+            tcp_stream.set_nodelay(true).context("set stream no delay").unwrap();
+
+            // immediately cleanup connections, should be default for SO_LINGER
+            tcp_stream
+                .set_linger(Some(Duration::from_secs(0)))
+                .context("set linger to 0")
+                .unwrap();
+
+            let socket = SockRef::from(&tcp_stream);
+
+            let keep_alive = TcpKeepalive::new()
+                .with_retries(2)
+                .with_time(Duration::from_secs(2))
+                .with_interval(Duration::from_secs(1));
+
+            socket.set_tcp_keepalive(&keep_alive).context("set tcp keep alive").unwrap();
+
+            let stream = tls_acceptor
+                .accept(tcp_stream)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Client TLS connect fail: {:?}", e)));
+
+            const TLS_TIMEOUT: u64 = 5;
+
+            let stream = tokio::time::timeout(Duration::from_secs(TLS_TIMEOUT), stream).map_err(move |_e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("Client TLS handshake timedout after {} seconds", TLS_TIMEOUT),
+                )
+            });
+
+            let res: Result<TlsStream<TcpStream>, anyhow::Error> = match stream.await {
+                Ok(Ok(tls_stream)) => Ok(tls_stream),
+                Err(e) => Err(e.into()),
+                Ok(Err(e)) => Err(e.into()),
+            };
+
+            (res, peer_ip)
+        };
+
+        tokio::spawn(async move {
+            let (tls_stream, peer_ip) = match handle_accept_tls_stream.await {
+                (Ok(tls_stream), peer_ip) => (tls_stream, peer_ip),
+                (Err(e), _) => return Err(e),
+            };
+
+            handle_new_client(tls_stream, peer_ip, server_version, restrict_to_version, state).await
+        });
+    }
+}
+
+// TODO: Should this not just be in the state struct
+async fn handle_new_client(
+    mut tls_stream: TlsStream<TcpStream>,
+    peer_ip: IpAddr,
+    server_version: Version,
+    restrict_to_version: Arc<Option<String>>,
+    state: ServerStateRef,
+) -> Result<(), anyhow::Error> {
+    let (version, authenticate, crypt_state) = Client::init(&mut tls_stream, server_version).await.context("init client")?;
+    let version_release = version.get_release();
+    let username = authenticate.get_username().to_string();
+
+    static USERNAME_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[\d+\].*$").unwrap());
+
+    if let Some(restrict_to) = restrict_to_version.as_ref() {
+        if !version_release.to_lowercase().contains(restrict_to) || !USERNAME_REGEX.is_match(&username) {
+            tracing::warn!(
+                "User '{}' connected with unofficial client '{}' from {}",
+                username,
+                version_release,
+                peer_ip
+            );
+
+            return Err(anyhow::anyhow!("Disconnecting unofficial client username: {}", username));
+        }
+    }
+
+    let (read, write) = io::split(tls_stream);
+
+    // we shouldn't really hit a case where this gets hit.
+    let (tx, rx) = mpsc::channel(4096);
+
+    let client = state.add_client(version, authenticate, crypt_state, write, tx, peer_ip).await;
+
+    tracing::info!("TCP new client {} connected {}", username, peer_ip);
+
+    let state_cl = state.clone();
+    let client_cl = client.clone();
+
+    match client_run(read, rx, &state_cl, &client_cl).await {
+        Ok(_) => (),
+        Err(_e) => (),
+    }
+
+    state_cl.disconnect(client.session_id, DisconnectReason::Disconnected).await;
+
+    Ok(())
+}
+
+pub async fn client_run(
+    read: ReadHalf<TlsStream<TcpStream>>,
+    receiver: Receiver<ClientMessage>,
+    state: &ServerStateRef,
+    client: &ClientArc,
+) -> Result<(), anyhow::Error> {
+    let codec_version = { state.codec_state.get_codec_version() };
+
+    client.send_message(MessageKind::CodecVersion, &codec_version).await?;
+
+    {
+        client.sync_client_and_channels(state).await.map_err(|e| {
+            tracing::error!("init client error during channel sync: {:?}", e);
+
+            e
+        })?;
+
+        client.send_my_user_state().await?;
+        client.send_server_sync().await?;
+        client.send_server_config().await?;
+    }
+
+    let user_state = { client.get_user_state() };
+
+    {
+        match state.broadcast_message(MessageKind::UserState, &user_state) {
+            Ok(_) => (),
+            Err(e) => tracing::error!("failed to send user state: {:?}", e),
+        }
+    }
+
+    // This spawns a task that will be used for both TCP and UDP messages.
+    let mut res = MessageHandler::handle(read, receiver, state, client).await;
+
+    if let Some(e) = res.join_next().await {
+        if let Ok(e) = e {
+            match e {
+                Ok(()) => {
+                    tracing::debug!("MessageHandler shut down with Success Response");
+                }
+                Err(e) => {
+                    tracing::debug!("MessageHandler shut down with error: {:?}", e);
+                }
+            }
+        }
+        // if one of the tasks fails, we should drop the other (i.e. whenever we manually
+        // disconnect this will kill the client)
+        res.shutdown().await;
+    }
+
+    Ok(())
+}
