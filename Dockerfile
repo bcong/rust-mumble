@@ -20,7 +20,7 @@ COPY --from=builder /rust-mumble /rust-mumble
 
 EXPOSE 64738/udp
 EXPOSE 64738/tcp
-EXPOSE 8080/tcp
+EXPOSE 47624/tcp
 
 ENV RUST_LOG=info
 

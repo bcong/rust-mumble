@@ -62,7 +62,7 @@ struct Args {
     #[clap(short, long, value_parser, default_value = "0.0.0.0:64738")]
     listen: String,
     /// Listen address for HTTP connections for the admin api
-    #[clap(short, long, value_parser, default_value = "0.0.0.0:8080")]
+    #[clap(short, long, value_parser, default_value = "0.0.0.0:47624")]
     http_listen: String,
     /// User for the http server api basic authentification
     #[clap(long, value_parser, default_value = "admin")]
@@ -211,13 +211,16 @@ async fn main() {
         tracing::info!("http server start listening on {}", args.http_listen);
         set.spawn(async move {
             let socket_addr: SocketAddr = args.http_listen.parse().expect("Invalid socket for http_listen");
-            if args.https {
+            let result = if args.https {
                 axum_server::bind_rustls(socket_addr, http_config)
                     .serve(http_server.into_make_service())
                     .await
-                    .unwrap();
             } else {
-                axum_server::bind(socket_addr).serve(http_server.into_make_service()).await.unwrap();
+                axum_server::bind(socket_addr).serve(http_server.into_make_service()).await
+            };
+
+            if let Err(e) = result {
+                tracing::error!("http server failed to start on {}: {} (voice server continues running)", socket_addr, e);
             }
         });
     } else {
