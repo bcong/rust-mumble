@@ -25,7 +25,7 @@ SERVICE_NAME="rust-mumble"
 LISTEN_ADDR="${LISTEN_ADDR:-0.0.0.0:64738}"
 HTTP_LISTEN_ADDR="${HTTP_LISTEN_ADDR:-0.0.0.0:47624}"
 HTTP_USER="${HTTP_USER:-admin}"
-RESTRICT_TO_VERSION="${RESTRICT_TO_VERSION:-CitizenFX}"
+RESTRICT_TO_VERSION="${RESTRICT_TO_VERSION:-}"
 SUPER_USER_NAME="${SUPER_USER_NAME:-superadmin}"
 UDP_BUFFER_BYTES=8388608   # matches UDP_SOCKET_BUFFER_SIZE in src/server/constants.rs
 
@@ -133,6 +133,16 @@ fi
 # 6. systemd unit
 # ---------------------------------------------------------------------------
 log "Writing systemd unit /etc/systemd/system/${SERVICE_NAME}.service..."
+
+# --restrict-to-version is opt-in only (empty by default = no version/username restriction,
+# any mumble-protocol client can join); set RESTRICT_TO_VERSION=CitizenFX to re-enable it.
+# --super-user-name/--super-user-password are always applied regardless, so that account keeps
+# working the same whether or not a restriction is active.
+RESTRICT_ARGS=""
+if [[ -n "$RESTRICT_TO_VERSION" ]]; then
+    RESTRICT_ARGS="--restrict-to-version ${RESTRICT_TO_VERSION}"
+fi
+
 cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
 Description=rust-mumble voice server for pma-voice
@@ -143,7 +153,7 @@ Type=simple
 User=${SERVICE_USER}
 WorkingDirectory=${INSTALL_DIR}
 LimitNOFILE=65536
-ExecStart=${INSTALL_DIR}/${BIN_NAME} --listen ${LISTEN_ADDR} --http-listen ${HTTP_LISTEN_ADDR} --http-user ${HTTP_USER} --http-password ${HTTP_PASSWORD} --restrict-to-version ${RESTRICT_TO_VERSION} --super-user-name ${SUPER_USER_NAME} --super-user-password ${SUPER_USER_PASSWORD}
+ExecStart=${INSTALL_DIR}/${BIN_NAME} --listen ${LISTEN_ADDR} --http-listen ${HTTP_LISTEN_ADDR} --http-user ${HTTP_USER} --http-password ${HTTP_PASSWORD} ${RESTRICT_ARGS} --super-user-name ${SUPER_USER_NAME} --super-user-password ${SUPER_USER_PASSWORD}
 Restart=on-failure
 RestartSec=3
 
