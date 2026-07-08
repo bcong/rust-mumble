@@ -91,6 +91,15 @@ struct Args {
     /// clients with the CitizenFX mumble client to join.
     #[clap(short, long, value_parser, default_value = None)]
     restrict_to_version: Option<String>,
+    /// Username of a single account that is allowed to bypass `restrict_to_version`, useful for
+    /// letting one admin connect with the official Mumble client while everyone else is
+    /// restricted to the game's voice client. Must be used together with `super_user_password`.
+    #[clap(long, value_parser, default_value = None)]
+    super_user_name: Option<String>,
+    /// Password for the `super_user_name` account, checked against the Mumble client's
+    /// authenticate password field. Must be used together with `super_user_name`.
+    #[clap(long, value_parser, default_value = None)]
+    super_user_password: Option<String>,
 }
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -133,6 +142,18 @@ async fn main() {
         tracing::info!("Restricting client version to {}", restrict);
     }
 
+    let super_user = match (args.super_user_name, args.super_user_password) {
+        (Some(name), Some(password)) => {
+            tracing::info!("Allowing super user '{}' to bypass restrict_to_version", name);
+            Some((name, password))
+        }
+        (None, None) => None,
+        _ => {
+            tracing::warn!("super_user_name and super_user_password must both be set, ignoring super user config");
+            None
+        }
+    };
+
     let config = Arc::new(generate_rustls_cert());
 
     let http_config = RustlsConfig::from_config(Arc::clone(&config));
@@ -160,6 +181,7 @@ async fn main() {
         udp_socket.clone(),
         args.strip_mumble_position,
         args.restrict_to_version,
+        super_user,
     ));
 
     tracing::info!("tcp/udp server start listening on {}", args.listen);

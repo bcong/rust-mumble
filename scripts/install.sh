@@ -26,6 +26,7 @@ LISTEN_ADDR="${LISTEN_ADDR:-0.0.0.0:64738}"
 HTTP_LISTEN_ADDR="${HTTP_LISTEN_ADDR:-0.0.0.0:47624}"
 HTTP_USER="${HTTP_USER:-admin}"
 RESTRICT_TO_VERSION="${RESTRICT_TO_VERSION:-CitizenFX}"
+SUPER_USER_NAME="${SUPER_USER_NAME:-superadmin}"
 UDP_BUFFER_BYTES=8388608   # matches UDP_SOCKET_BUFFER_SIZE in src/server/constants.rs
 
 log()  { echo -e "\033[1;32m[install]\033[0m $*"; }
@@ -104,6 +105,14 @@ RANDOM_POOL=$(head -c 4096 /dev/urandom | tr -dc 'A-Za-z0-9')
 HTTP_PASSWORD="${RANDOM_POOL:0:$PASSWORD_LENGTH}"
 [[ ${#HTTP_PASSWORD} -eq $PASSWORD_LENGTH ]] || die "Failed to generate a random password"
 
+# Same approach for the super user account (see item 6 below) - a single account allowed to
+# bypass RESTRICT_TO_VERSION and connect with the official Mumble client (e.g. for an admin to
+# listen in/moderate) while every other client is still restricted to the game's voice client.
+SUPER_USER_PASSWORD_LENGTH=$(( (RANDOM % 13) + 20 ))
+SUPER_USER_RANDOM_POOL=$(head -c 4096 /dev/urandom | tr -dc 'A-Za-z0-9')
+SUPER_USER_PASSWORD="${SUPER_USER_RANDOM_POOL:0:$SUPER_USER_PASSWORD_LENGTH}"
+[[ ${#SUPER_USER_PASSWORD} -eq $SUPER_USER_PASSWORD_LENGTH ]] || die "Failed to generate a random super user password"
+
 # ---------------------------------------------------------------------------
 # 5. Kernel tuning for UDP burst traffic (matches the 8MB SO_RCVBUF/SO_SNDBUF
 #    the server requests at startup - without this, the kernel silently caps
@@ -134,7 +143,7 @@ Type=simple
 User=${SERVICE_USER}
 WorkingDirectory=${INSTALL_DIR}
 LimitNOFILE=65536
-ExecStart=${INSTALL_DIR}/${BIN_NAME} --listen ${LISTEN_ADDR} --http-listen ${HTTP_LISTEN_ADDR} --http-user ${HTTP_USER} --http-password ${HTTP_PASSWORD} --restrict-to-version ${RESTRICT_TO_VERSION}
+ExecStart=${INSTALL_DIR}/${BIN_NAME} --listen ${LISTEN_ADDR} --http-listen ${HTTP_LISTEN_ADDR} --http-user ${HTTP_USER} --http-password ${HTTP_PASSWORD} --restrict-to-version ${RESTRICT_TO_VERSION} --super-user-name ${SUPER_USER_NAME} --super-user-password ${SUPER_USER_PASSWORD}
 Restart=on-failure
 RestartSec=3
 
@@ -148,6 +157,8 @@ CREDENTIALS_FILE="${INSTALL_DIR}/.http_credentials"
 cat > "$CREDENTIALS_FILE" <<EOF
 http_user=${HTTP_USER}
 http_password=${HTTP_PASSWORD}
+super_user_name=${SUPER_USER_NAME}
+super_user_password=${SUPER_USER_PASSWORD}
 EOF
 chown root:root "$CREDENTIALS_FILE"
 chmod 600 "$CREDENTIALS_FILE"
@@ -201,6 +212,8 @@ echo " Voice (tcp/udp)  : ${LISTEN_ADDR}"
 echo " HTTP admin api   : http://<server-ip>:${HTTP_PORT}"
 echo " HTTP admin user  : ${HTTP_USER}"
 echo " HTTP admin pass  : ${HTTP_PASSWORD}"
+echo " Super user name  : ${SUPER_USER_NAME} (bypasses --restrict-to-version, use with official Mumble client)"
+echo " Super user pass  : ${SUPER_USER_PASSWORD}"
 echo " Saved also at    : ${CREDENTIALS_FILE} (root-only, chmod 600)"
 echo "================================================================"
 echo " Manage with:"

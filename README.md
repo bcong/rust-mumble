@@ -69,6 +69,10 @@ Options:
           Path to the certificate file for the TLS certificate [default: cert.pem]
   -r, --restrict-to-version <RESTRICT_TO_VERSION>
           Restricts the clients release name to a specific version, useful for providing a stop-gap if you want to stop external clients from joining, setting to `CitizenFX` will only allow clients with the CitizenFX mumble client to join
+      --super-user-name <SUPER_USER_NAME>
+          Username of a single account that is allowed to bypass `restrict_to_version`, useful for letting one admin connect with the official Mumble client while everyone else is restricted to the game's voice client. Must be used together with `super_user_password`
+      --super-user-password <SUPER_USER_PASSWORD>
+          Password for the `super_user_name` account, checked against the Mumble client's authenticate password field. Must be used together with `super_user_name`
   -V, --version
           Print version
 ```
